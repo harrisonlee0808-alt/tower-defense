@@ -1,17 +1,35 @@
 {
   "grid_size": 16,
   "tile_size": 40,
-  "starting_energy": 50,
+  "currency_name": "Energy",
+  "starting_currency": 50,
   "sell_refund_pct": 0.6,
+  "require_at_least_one_tower": true,
   "core": {
     "max_integrity": 100,
     "integrity_loss_per_wave": 10,
     "color": [255, 255, 0],
     "size": 20
   },
-  "waves": {
-    "enemies_per_wave": 5,
-    "spawn_interval": 1.0
+  "wave_scaling": {
+    "base_enemy_count": 5,
+    "enemy_count_growth": 2,
+    "base_spawn_interval": 1.0,
+    "spawn_interval_decay": 0.03,
+    "min_spawn_interval": 0.25,
+    "enemy_hp_multiplier_per_wave": 1.10,
+    "enemy_speed_multiplier_per_wave": 1.03,
+    "enemy_damage_multiplier_per_wave": 1.02
+  },
+  "core_mining": {
+    "reward_base": 20,
+    "reward_growth": 8,
+    "reward_multiplier_per_wave": 1.05
+  },
+  "ui": {
+    "sidebar_width": 320,
+    "sidebar_padding": 12,
+    "window_margin": 12
   }
 }
 
