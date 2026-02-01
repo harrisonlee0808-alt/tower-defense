@@ -34,17 +34,24 @@ class EnergyCore(Entity):
             return 0.0
         return self.current_integrity / self.max_integrity
     
-    def render(self, screen):
-        """Render the Energy Core."""
-        # Draw core circle
-        pygame.draw.circle(screen, self.color, (int(self.x), int(self.y)), self.size)
-        pygame.draw.circle(screen, (0, 0, 0), (int(self.x), int(self.y)), self.size, 2)
+    def render(self, screen, map_origin_x, map_origin_y, tile_size, origin_tile_x, origin_tile_y, footprint_w, footprint_h):
+        """Render the Energy Core using exact footprint coordinates."""
+        # Calculate pixel position from origin tile (top-left)
+        origin_x = map_origin_x + origin_tile_x * tile_size
+        origin_y = map_origin_y + origin_tile_y * tile_size
+        footprint_rect = pygame.Rect(origin_x, origin_y, 
+                                    footprint_w * tile_size, 
+                                    footprint_h * tile_size)
+        
+        # Draw filled rectangle for footprint
+        pygame.draw.rect(screen, self.color, footprint_rect)
+        pygame.draw.rect(screen, (0, 0, 0), footprint_rect, 2)
         
         # Draw integrity bar above core
         bar_width = 40
         bar_height = 6
         bar_x = int(self.x - bar_width // 2)
-        bar_y = int(self.y - self.size - 15)
+        bar_y = int(self.y - (footprint_h * tile_size // 2 if tile_size and footprint_h else self.size) - 15)
         
         # Background bar
         pygame.draw.rect(screen, (100, 100, 100), 

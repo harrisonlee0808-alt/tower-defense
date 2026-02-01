@@ -59,13 +59,17 @@ class Mine(Entity):
         """Check if mine has been consumed (detonated and flash finished)."""
         return self.detonated and self.detonated_timer >= self.detonation_duration
     
-    def render(self, screen):
-        """Render the mine."""
+    def render(self, screen, map_origin_x, map_origin_y, tile_size, origin_tile_x, origin_tile_y, footprint_w, footprint_h):
+        """Render the mine using exact footprint coordinates."""
         if self.detonated:
             # Show flash effect
             flash_progress = min(1.0, self.detonated_timer / self.detonation_duration)
             flash_radius = int(self.radius_pixels * (0.5 + flash_progress * 0.5))
             flash_alpha = int(255 * (1.0 - flash_progress))
+            
+            # Calculate center from origin tile
+            center_x = map_origin_x + (origin_tile_x + footprint_w / 2.0) * tile_size
+            center_y = map_origin_y + (origin_tile_y + footprint_h / 2.0) * tile_size
             
             # Draw expanding flash circle
             flash_color = (255, 255, 0, flash_alpha)
@@ -74,15 +78,24 @@ class Mine(Entity):
             pygame.draw.circle(flash_surface, (255, 255, 0, flash_alpha), 
                              (flash_radius, flash_radius), flash_radius)
             screen.blit(flash_surface, 
-                       (int(self.x - flash_radius), int(self.y - flash_radius)))
+                       (int(center_x - flash_radius), int(center_y - flash_radius)))
         else:
-            # Draw mine
-            pygame.draw.circle(screen, self.color, (int(self.x), int(self.y)), self.size)
-            pygame.draw.circle(screen, (0, 0, 0), (int(self.x), int(self.y)), self.size, 1)
+            # Calculate pixel position from origin tile (top-left)
+            origin_x = map_origin_x + origin_tile_x * tile_size
+            origin_y = map_origin_y + origin_tile_y * tile_size
+            footprint_rect = pygame.Rect(origin_x, origin_y, 
+                                        footprint_w * tile_size, 
+                                        footprint_h * tile_size)
+            
+            # Draw filled rectangle for footprint
+            pygame.draw.rect(screen, self.color, footprint_rect)
+            pygame.draw.rect(screen, (0, 0, 0), footprint_rect, 1)
             
             # Draw radius circle (subtle, only when armed)
             if self.armed:
+                center_x = origin_x + footprint_rect.width // 2
+                center_y = origin_y + footprint_rect.height // 2
                 pygame.draw.circle(screen, (150, 150, 150), 
-                                 (int(self.x), int(self.y)), 
+                                 (int(center_x), int(center_y)), 
                                  int(self.radius_pixels), 1)
 

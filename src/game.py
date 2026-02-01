@@ -107,6 +107,16 @@ class Game:
         self.repair_amount = repair_config.get('restore_amount', 20)
         self.repair_used = False
         
+        # Pause system
+        self.paused = False
+        
+        # Fast-forward system (build phase only)
+        self.game_speed = 1.0  # 1.0 = normal, 2.0 = fast-forward
+        
+        # Tooltip system
+        self.hovered_tower = None
+        self.hovered_enemy = None
+        
         # Economy
         self.currency_name = self.game_config['currency_name']
         self.energy = self.game_config['starting_currency']
@@ -163,8 +173,9 @@ class Game:
         )
         self.core_original_max_integrity = core_config['max_integrity']
         
-        # Store footprint info on core
-        self.core.origin_tile = (core_origin_x, core_origin_y)
+        # Store footprint info on core with origin tile coordinates
+        self.core.origin_tile_x = core_origin_x
+        self.core.origin_tile_y = core_origin_y
         self.core.footprint_w = core_footprint_w
         self.core.footprint_h = core_footprint_h
         self.core.occupied_tiles = []
@@ -275,12 +286,28 @@ class Game:
                         self.complete_wave()
                 elif event.key == pygame.K_r:
                     if self.phase == 'build' and not self.countdown_active:
-                        self.emergency_repair()
+                        if self.build_mode == 'place':
+                            # Rotate footprint (if not in selection mode)
+                            pass  # Rotation feature - can be added later
+                        else:
+                            self.emergency_repair()
+                elif event.key == pygame.K_p:
+                    # Toggle pause
+                    if self.phase == 'wave' or self.countdown_active:
+                        self.paused = not self.paused
+                elif event.key == pygame.K_f:
+                    # Toggle fast-forward (build phase only)
+                    if self.phase == 'build' and not self.countdown_active:
+                        self.game_speed = 2.0 if self.game_speed == 1.0 else 1.0
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:  # Left click
                     self.handle_placement(event.pos)
             elif event.type == pygame.MOUSEMOTION:
                 self.mouse_pos = event.pos
+                # Update hovered structures/enemies for tooltips
+                self._update_hovered_objects(event.pos)
+                # Update hovered structures/enemies for tooltips
+                self._update_hovered_objects(event.pos)
     
     def handle_placement(self, mouse_pos):
         """Handle structure placement and deletion."""
@@ -358,6 +385,12 @@ class Game:
             self.grid.set_tile(tile_x, tile_y, 1)
             self.occupancy_grid[tile_y][tile_x] = None
         building.occupied_tiles = []
+        
+        # Debug assertion: verify no references remain
+        for y in range(self.grid_size):
+            for x in range(self.grid_size):
+                if self.occupancy_grid[y][x] == building:
+                    print(f"WARNING: Building still in occupancy grid at ({x}, {y})")
     
     def can_place_tower(self, grid_x, grid_y):
         """Check if a tower can be placed at the given grid position (top-left of footprint)."""
@@ -396,29 +429,38 @@ class Game:
         footprint_w = tower_data.get('footprint_w', 1)
         footprint_h = tower_data.get('footprint_h', 1)
         
-        # Calculate center position for rendering
-        center_grid_x = grid_x + footprint_w // 2
-        center_grid_y = grid_y + footprint_h // 2
+        # Store origin tile (top-left of footprint)
+        origin_tile_x = grid_x
+        origin_tile_y = grid_y
+        
+        # Calculate center position for targeting (center of footprint)
+        center_grid_x = grid_x + footprint_w / 2.0
+        center_grid_y = grid_y + footprint_h / 2.0
         tower_x, tower_y = self._grid_to_screen_pixel(center_grid_x, center_grid_y)
+        
+        # Calculate range in pixels from range_tiles
+        range_tiles = tower_data.get('range_tiles', 3.0)
+        range_pixels = range_tiles * self.tile_size
         
         tower = DefenseTower(
             tower_x, tower_y,
             tower_data['damage'],
-            tower_data['range'],
+            range_pixels,
             tower_data['cooldown'],
             tower_data['size'],
             tuple(tower_data['color']),
             tower_data['cost']
         )
         
-        # Store footprint info
-        tower.origin_tile = (grid_x, grid_y)
+        # Store footprint info with origin tile coordinates
+        tower.origin_tile_x = origin_tile_x
+        tower.origin_tile_y = origin_tile_y
         tower.footprint_w = footprint_w
         tower.footprint_h = footprint_h
         tower.occupied_tiles = []
         
         # Mark footprint as occupied
-        self._mark_footprint_occupied(grid_x, grid_y, footprint_w, footprint_h, tower)
+        self._mark_footprint_occupied(origin_tile_x, origin_tile_y, footprint_w, footprint_h, tower)
         
         self.towers.append(tower)
         self.energy -= tower_data['cost']
@@ -430,9 +472,13 @@ class Game:
         footprint_w = mine_data.get('footprint_w', 1)
         footprint_h = mine_data.get('footprint_h', 1)
         
-        # Calculate center position for rendering
-        center_grid_x = grid_x + footprint_w // 2
-        center_grid_y = grid_y + footprint_h // 2
+        # Store origin tile (top-left of footprint)
+        origin_tile_x = grid_x
+        origin_tile_y = grid_y
+        
+        # Calculate center position for rendering (center of footprint)
+        center_grid_x = grid_x + footprint_w / 2.0
+        center_grid_y = grid_y + footprint_h / 2.0
         mine_x, mine_y = self._grid_to_screen_pixel(center_grid_x, center_grid_y)
         
         mine = Mine(
@@ -445,14 +491,15 @@ class Game:
             mine_data['cost']
         )
         
-        # Store footprint info
-        mine.origin_tile = (grid_x, grid_y)
+        # Store footprint info with origin tile coordinates
+        mine.origin_tile_x = origin_tile_x
+        mine.origin_tile_y = origin_tile_y
         mine.footprint_w = footprint_w
         mine.footprint_h = footprint_h
         mine.occupied_tiles = []
         
         # Mark footprint as occupied
-        self._mark_footprint_occupied(grid_x, grid_y, footprint_w, footprint_h, mine)
+        self._mark_footprint_occupied(origin_tile_x, origin_tile_y, footprint_w, footprint_h, mine)
         
         self.mines.append(mine)
         self.energy -= mine_data['cost']
@@ -494,12 +541,35 @@ class Game:
     
     def get_tower_at_position(self, grid_x, grid_y):
         """Get the tower at a given grid position, or None."""
-        tower_x, tower_y = self._grid_to_screen_pixel(grid_x, grid_y)
-        for tower in self.towers:
-            t_x, t_y = tower.get_position()
-            if abs(t_x - tower_x) < 1 and abs(t_y - tower_y) < 1:
-                return tower
+        # Check occupancy grid
+        if 0 <= grid_x < self.grid_size and 0 <= grid_y < self.grid_size:
+            building = self.occupancy_grid[grid_y][grid_x]
+            if building and building in self.towers:
+                return building
         return None
+    
+    def _update_hovered_objects(self, mouse_pos):
+        """Update hovered tower/enemy for tooltips."""
+        self.hovered_tower = None
+        self.hovered_enemy = None
+        
+        if self.phase == 'build':
+            # Check for hovered towers/mines
+            grid_x, grid_y = self._screen_pixel_to_grid(mouse_pos[0], mouse_pos[1])
+            if 0 <= grid_x < self.grid_size and 0 <= grid_y < self.grid_size:
+                building = self.occupancy_grid[grid_y][grid_x]
+                if building and (building in self.towers or building in self.mines):
+                    self.hovered_tower = building
+        elif self.phase == 'wave':
+            # Check for hovered enemies
+            for enemy in self.enemies:
+                if enemy.is_alive():
+                    # Simple distance check (within enemy size)
+                    dx = mouse_pos[0] - enemy.x
+                    dy = mouse_pos[1] - enemy.y
+                    if dx * dx + dy * dy < (enemy.size + 10) ** 2:
+                        self.hovered_enemy = enemy
+                        break
     
     def start_wave(self):
         """Start a new enemy wave (with countdown if enabled)."""
@@ -727,6 +797,8 @@ class Game:
         for mine in self.mines[:]:  # Use slice to safely remove during iteration
             mine.update(dt, self.enemies)
             if mine.is_consumed():
+                # Clear footprint from occupancy grid before removing
+                self._clear_footprint(mine)
                 self.mines.remove(mine)
         
         # Check wave completion - auto-advance to wave_complete phase
@@ -760,25 +832,17 @@ class Game:
         # Render grid to map surface
         self.grid.render(map_surface)
         
-        # Render core to map surface (temporarily adjust coordinates for rendering)
+        # Render core to map surface
         if self.core:
-            core_x_orig = self.core.x
-            core_y_orig = self.core.y
-            self.core.x -= self.map_origin_x
-            self.core.y -= self.map_origin_y
-            self.core.render(map_surface)
-            self.core.x = core_x_orig
-            self.core.y = core_y_orig
+            self.core.render(map_surface, 0, 0, self.tile_size,
+                           self.core.origin_tile_x, self.core.origin_tile_y,
+                           self.core.footprint_w, self.core.footprint_h)
         
         # Render towers to map surface
         for tower in self.towers:
-            tower_x_orig = tower.x
-            tower_y_orig = tower.y
-            tower.x -= self.map_origin_x
-            tower.y -= self.map_origin_y
-            tower.render(map_surface)
-            tower.x = tower_x_orig
-            tower.y = tower_y_orig
+            tower.render(map_surface, 0, 0, self.tile_size,
+                        tower.origin_tile_x, tower.origin_tile_y,
+                        tower.footprint_w, tower.footprint_h)
         
         # Render enemies to map surface
         for enemy in self.enemies:
@@ -792,13 +856,9 @@ class Game:
         
         # Render mines to map surface
         for mine in self.mines:
-            mine_x_orig = mine.x
-            mine_y_orig = mine.y
-            mine.x -= self.map_origin_x
-            mine.y -= self.map_origin_y
-            mine.render(map_surface)
-            mine.x = mine_x_orig
-            mine.y = mine_y_orig
+            mine.render(map_surface, 0, 0, self.tile_size,
+                       mine.origin_tile_x, mine.origin_tile_y,
+                       mine.footprint_w, mine.footprint_h)
         
         # Blit map surface to screen at offset
         self.screen.blit(map_surface, (self.map_origin_x, self.map_origin_y))
@@ -808,7 +868,6 @@ class Game:
             self.render_focus_arrows()
         elif self.preview_show_in_build and self.phase == 'build' and self.wave_focus_enabled and self.wave_focus_direction:
             self.render_preview_arrows()
-            self.render_preview_markers()
         
         # Render hover preview (uses screen coordinates)
         self.render_hover_preview()
@@ -904,26 +963,6 @@ class Game:
             color = tuple(int(c * pulse_alpha) for c in arrow_color)
             pygame.draw.polygon(self.screen, color, points)
     
-    def render_preview_markers(self):
-        """Render spawn markers along the focused edge."""
-        marker_size = 4
-        marker_color = (150, 150, 200)
-        
-        focused_points = self._get_focused_spawn_points(self.wave_focus_direction)
-        if not focused_points:
-            return
-        
-        # Sample points along the edge
-        if len(focused_points) > self.preview_marker_count:
-            step = len(focused_points) // self.preview_marker_count
-            sample_points = focused_points[::step][:self.preview_marker_count]
-        else:
-            sample_points = focused_points
-        
-        for grid_x, grid_y in sample_points:
-            pixel_x, pixel_y = self._grid_to_screen_pixel(grid_x, grid_y)
-            pygame.draw.circle(self.screen, marker_color, (pixel_x, pixel_y), marker_size)
-    
     def render_sidebar(self):
         """Render the sidebar panel with all UI text."""
         # Draw sidebar background
@@ -946,9 +985,17 @@ class Game:
         
         # Phase
         phase_text = self.get_phase_text()
+        if self.paused:
+            phase_text += " (Paused)"
         phase_surface = font.render(f"Phase: {phase_text}", True, (200, 200, 200))
         self.screen.blit(phase_surface, (x, y))
         y += 30
+        
+        # Game speed (build phase only)
+        if self.phase == 'build' and self.game_speed > 1.0:
+            speed_text = small_font.render(f"Speed: {int(self.game_speed)}x", True, (200, 255, 200))
+            self.screen.blit(speed_text, (x, y))
+            y += 25
         
         # Currency
         currency_text = font.render(f"{self.currency_name}: {int(self.energy)}", True, (255, 255, 100))
@@ -1059,6 +1106,57 @@ class Game:
         
         y += 10
         
+        # Tooltips
+        if self.hovered_tower:
+            y += 10
+            tooltip_title = small_font.render("Hovered Structure:", True, (255, 255, 200))
+            self.screen.blit(tooltip_title, (x, y))
+            y += 22
+            
+            if self.hovered_tower in self.towers:
+                tower_data = self.tower_config['basic_tower']
+                tooltip_lines = [
+                    f"Type: {tower_data.get('name', 'Tower')}",
+                    f"Cost: {self.hovered_tower.cost}",
+                    f"Damage: {self.hovered_tower.damage}",
+                    f"Range: {tower_data.get('range_tiles', 3.0):.1f} tiles",
+                    f"Footprint: {self.hovered_tower.footprint_w}x{self.hovered_tower.footprint_h}"
+                ]
+            else:  # mine
+                mine_data = self.tower_config['mine']
+                tooltip_lines = [
+                    f"Type: {mine_data.get('name', 'Mine')}",
+                    f"Cost: {self.hovered_tower.cost}",
+                    f"Damage: {self.hovered_tower.damage}",
+                    f"Radius: {mine_data.get('radius_tiles', 1.5):.1f} tiles",
+                    f"Footprint: {self.hovered_tower.footprint_w}x{self.hovered_tower.footprint_h}"
+                ]
+            
+            for line in tooltip_lines:
+                tooltip_surface = small_font.render(line, True, (200, 200, 255))
+                self.screen.blit(tooltip_surface, (x + 5, y))
+                y += 20
+            y += 5
+        
+        if self.hovered_enemy:
+            y += 10
+            tooltip_title = small_font.render("Hovered Enemy:", True, (255, 200, 200))
+            self.screen.blit(tooltip_title, (x, y))
+            y += 22
+            
+            enemy_type = getattr(self.hovered_enemy, 'enemy_type', 'light')
+            enemy_type_name = self.enemy_config.get(enemy_type, {}).get('name', enemy_type.capitalize())
+            tooltip_lines = [
+                f"Type: {enemy_type_name}",
+                f"HP: {int(self.hovered_enemy.current_health)}/{int(self.hovered_enemy.max_health)}"
+            ]
+            
+            for line in tooltip_lines:
+                tooltip_surface = small_font.render(line, True, (255, 200, 200))
+                self.screen.blit(tooltip_surface, (x + 5, y))
+                y += 20
+            y += 5
+        
         # Emergency repair status
         if self.repair_enabled:
             repair_status = "Used" if self.repair_used else "Available"
@@ -1073,6 +1171,8 @@ class Game:
             "1/2 - Choose Type",
             "X - Sell Structure",
             "R - Emergency Repair",
+            "P - Pause (wave)",
+            "F - Fast-forward (build)",
             "SPACE - Start/Complete",
             "ESC - Cancel/Quit"
         ]
@@ -1152,11 +1252,10 @@ class Game:
             footprint_w = struct_data.get('footprint_w', 1)
             footprint_h = struct_data.get('footprint_h', 1)
             
-            # Calculate footprint rectangle
-            origin_x, origin_y = self._grid_to_screen_pixel(grid_x, grid_y)
-            # Adjust to top-left of tile
-            origin_x -= self.tile_size // 2
-            origin_y -= self.tile_size // 2
+            # Calculate footprint rectangle (top-left corner of footprint)
+            # grid_x, grid_y is the top-left tile of the footprint
+            origin_x = self.map_origin_x + grid_x * self.tile_size
+            origin_y = self.map_origin_y + grid_y * self.tile_size
             footprint_rect = pygame.Rect(origin_x, origin_y, 
                                         footprint_w * self.tile_size, 
                                         footprint_h * self.tile_size)

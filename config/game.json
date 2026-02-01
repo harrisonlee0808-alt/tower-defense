@@ -1,6 +1,6 @@
 {
-  "grid_size": 16,
-  "tile_size": 40,
+  "grid_size": 24,
+  "tile_size": 28,
   "currency_name": "Energy",
   "starting_currency": 50,
   "sell_refund_pct": 0.6,
