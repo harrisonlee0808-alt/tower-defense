@@ -30,6 +30,13 @@
     "sidebar_width": 320,
     "sidebar_padding": 12,
     "window_margin": 12
+  },
+  "wave_focus": {
+    "enabled": true,
+    "majority_pct": 0.7,
+    "randomness": 0.15,
+    "arrow_count": 3,
+    "arrow_pulse": true
   }
 }
 

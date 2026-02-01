@@ -6,9 +6,11 @@ import pygame
 import json
 import os
 import random
+import math
 from src.grid import Grid
 from src.core import EnergyCore
 from src.tower import DefenseTower
+from src.mine import Mine
 from src.enemy import Enemy
 
 
@@ -59,6 +61,7 @@ class Game:
         # Game state
         self.core = None
         self.towers = []
+        self.mines = []
         self.enemies = []
         self.wave_number = 1
         self.wave_active = False
@@ -69,6 +72,15 @@ class Game:
         self.last_spawn_time = 0.0
         self.wave_reward = 0  # Reward for current wave
         
+        # Wave focus direction
+        self.wave_focus_direction = None  # 'N', 'E', 'S', 'W'
+        wave_focus_config = self.game_config.get('wave_focus', {})
+        self.wave_focus_enabled = wave_focus_config.get('enabled', False)
+        self.wave_focus_majority_pct = wave_focus_config.get('majority_pct', 0.7)
+        self.wave_focus_arrow_count = wave_focus_config.get('arrow_count', 3)
+        self.wave_focus_arrow_pulse = wave_focus_config.get('arrow_pulse', True)
+        self.arrow_pulse_time = 0.0
+        
         # Economy
         self.currency_name = self.game_config['currency_name']
         self.energy = self.game_config['starting_currency']
@@ -78,9 +90,10 @@ class Game:
         # Phase system: 'build', 'wave', or 'wave_complete'
         self.phase = 'build'
         
-        # Placement mode
-        self.placement_mode = None  # 'tower', 'delete', or None
-        self.selected_tower_type = 'basic_tower'
+        # Build mode: 'none', 'place', 'sell', 'select'
+        self.build_mode = 'none'
+        self.is_selecting_tower = False
+        self.selected_tower_type = None  # 'basic_tower', 'mine', or None
         
         # UI messages
         self.ui_message = None
@@ -148,19 +161,45 @@ class Game:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    self.running = False
+                    if self.is_selecting_tower or self.build_mode == 'place':
+                        # Cancel selection/placement
+                        self.is_selecting_tower = False
+                        self.build_mode = 'none'
+                        self.selected_tower_type = None
+                    else:
+                        self.running = False
                 elif event.key == pygame.K_t:
                     if self.phase == 'build':
-                        if self.placement_mode == 'tower':
-                            self.placement_mode = None
+                        if self.is_selecting_tower:
+                            # Close selection
+                            self.is_selecting_tower = False
+                            self.build_mode = 'none'
+                        elif self.build_mode == 'place':
+                            # Return to selection
+                            self.build_mode = 'select'
+                            self.is_selecting_tower = True
                         else:
-                            self.placement_mode = 'tower'
+                            # Open selection
+                            self.is_selecting_tower = True
+                            self.build_mode = 'select'
+                elif event.key == pygame.K_1:
+                    if self.is_selecting_tower:
+                        self.selected_tower_type = 'basic_tower'
+                        self.is_selecting_tower = False
+                        self.build_mode = 'place'
+                elif event.key == pygame.K_2:
+                    if self.is_selecting_tower:
+                        self.selected_tower_type = 'mine'
+                        self.is_selecting_tower = False
+                        self.build_mode = 'place'
                 elif event.key == pygame.K_x:
                     if self.phase == 'build':
-                        if self.placement_mode == 'delete':
-                            self.placement_mode = None
+                        if self.build_mode == 'sell':
+                            self.build_mode = 'none'
                         else:
-                            self.placement_mode = 'delete'
+                            self.build_mode = 'sell'
+                            self.is_selecting_tower = False
+                            self.selected_tower_type = None
                 elif event.key == pygame.K_SPACE:
                     if self.phase == 'build' and not self.wave_active and not self.wave_complete:
                         self.start_wave()
@@ -176,26 +215,39 @@ class Game:
         """Handle structure placement and deletion."""
         grid_x, grid_y = self._screen_pixel_to_grid(mouse_pos[0], mouse_pos[1])
         
-        if self.placement_mode == 'tower':
+        if self.build_mode == 'place':
             if self.phase != 'build':
                 self.show_message("Can't place during wave", 2.0)
                 return
             
-            if self.can_place_tower(grid_x, grid_y):
-                self.place_tower(grid_x, grid_y)
-            else:
-                tower_data = self.tower_config[self.selected_tower_type]
-                if self.energy < tower_data['cost']:
-                    self.show_message("Not enough energy", 2.0)
-                elif not self.grid.is_buildable(grid_x, grid_y):
-                    self.show_message("Can't build here", 1.0)
+            if not self.selected_tower_type:
+                return
+            
+            if self.selected_tower_type == 'mine':
+                if self.can_place_mine(grid_x, grid_y):
+                    self.place_mine(grid_x, grid_y)
+                else:
+                    mine_data = self.tower_config['mine']
+                    if self.energy < mine_data['cost']:
+                        self.show_message("Not enough energy", 2.0)
+                    elif not self.grid.is_buildable(grid_x, grid_y):
+                        self.show_message("Can't build here", 1.0)
+            else:  # basic_tower
+                if self.can_place_tower(grid_x, grid_y):
+                    self.place_tower(grid_x, grid_y)
+                else:
+                    tower_data = self.tower_config[self.selected_tower_type]
+                    if self.energy < tower_data['cost']:
+                        self.show_message("Not enough energy", 2.0)
+                    elif not self.grid.is_buildable(grid_x, grid_y):
+                        self.show_message("Can't build here", 1.0)
         
-        elif self.placement_mode == 'delete':
+        elif self.build_mode == 'sell':
             if self.phase != 'build':
                 self.show_message("Can't sell during wave", 2.0)
                 return
             
-            self.sell_tower(grid_x, grid_y)
+            self.sell_structure(grid_x, grid_y)
     
     def can_place_tower(self, grid_x, grid_y):
         """Check if a tower can be placed at the given grid position."""
@@ -205,15 +257,47 @@ class Game:
         if not self.grid.is_buildable(grid_x, grid_y):
             return False
         
+        if not self.selected_tower_type or self.selected_tower_type not in self.tower_config:
+            return False
+        
         tower_data = self.tower_config[self.selected_tower_type]
         if self.energy < tower_data['cost']:
             return False
         
-        # Check if there's already a tower at this position
+        # Check if there's already a structure at this position
         tower_x, tower_y = self._grid_to_screen_pixel(grid_x, grid_y)
         for tower in self.towers:
             t_x, t_y = tower.get_position()
             if abs(t_x - tower_x) < 1 and abs(t_y - tower_y) < 1:
+                return False
+        for mine in self.mines:
+            m_x, m_y = mine.get_position()
+            if abs(m_x - tower_x) < 1 and abs(m_y - tower_y) < 1:
+                return False
+        
+        return True
+    
+    def can_place_mine(self, grid_x, grid_y):
+        """Check if a mine can be placed at the given grid position."""
+        if self.phase != 'build':
+            return False
+        
+        if not self.grid.is_buildable(grid_x, grid_y):
+            return False
+        
+        mine_data = self.tower_config['mine']
+        if self.energy < mine_data['cost']:
+            return False
+        
+        # Check if there's already a structure at this position
+        mine_x, mine_y = self._grid_to_screen_pixel(grid_x, grid_y)
+        for tower in self.towers:
+            t_x, t_y = tower.get_position()
+            if abs(t_x - mine_x) < 1 and abs(t_y - mine_y) < 1:
+                return False
+        for mine in self.mines:
+            m_x, m_y = mine.get_position()
+            if abs(m_x - mine_x) < 1 and abs(m_y - mine_y) < 1:
                 return False
         
         return True
@@ -235,16 +319,35 @@ class Game:
         self.towers.append(tower)
         self.grid.set_tile(grid_x, grid_y, 0)
         self.energy -= tower_data['cost']
-        self.placement_mode = None
+        # Keep in place mode after placing (don't exit)
     
-    def sell_tower(self, grid_x, grid_y):
-        """Sell a tower at the given grid position."""
-        tower_x, tower_y = self._grid_to_screen_pixel(grid_x, grid_y)
+    def place_mine(self, grid_x, grid_y):
+        """Place a mine at the given grid position."""
+        mine_x, mine_y = self._grid_to_screen_pixel(grid_x, grid_y)
+        mine_data = self.tower_config['mine']
+        
+        mine = Mine(
+            mine_x, mine_y,
+            mine_data['radius_tiles'],
+            self.tile_size,
+            mine_data['damage'],
+            mine_data['size'],
+            tuple(mine_data['color']),
+            mine_data['cost']
+        )
+        self.mines.append(mine)
+        self.grid.set_tile(grid_x, grid_y, 0)
+        self.energy -= mine_data['cost']
+        # Keep in place mode after placing (don't exit)
+    
+    def sell_structure(self, grid_x, grid_y):
+        """Sell a tower or mine at the given grid position."""
+        struct_x, struct_y = self._grid_to_screen_pixel(grid_x, grid_y)
         
         # Find tower at this position
         for i, tower in enumerate(self.towers):
             t_x, t_y = tower.get_position()
-            if abs(t_x - tower_x) < 1 and abs(t_y - tower_y) < 1:
+            if abs(t_x - struct_x) < 1 and abs(t_y - struct_y) < 1:
                 # Calculate refund
                 refund = int(tower.cost * self.sell_refund_pct)
                 self.energy += refund
@@ -254,11 +357,25 @@ class Game:
                 
                 # Free the tile
                 self.grid.set_tile(grid_x, grid_y, 1)
-                self.placement_mode = None
                 return
         
-        # No tower found at this position
-        self.show_message("No tower here", 1.0)
+        # Find mine at this position
+        for i, mine in enumerate(self.mines):
+            m_x, m_y = mine.get_position()
+            if abs(m_x - struct_x) < 1 and abs(m_y - struct_y) < 1:
+                # Calculate refund
+                refund = int(mine.cost * self.sell_refund_pct)
+                self.energy += refund
+                
+                # Remove mine
+                self.mines.pop(i)
+                
+                # Free the tile
+                self.grid.set_tile(grid_x, grid_y, 1)
+                return
+        
+        # No structure found at this position
+        self.show_message("No structure here", 1.0)
     
     def show_message(self, message, duration=2.0):
         """Show a temporary UI message."""
@@ -280,12 +397,26 @@ class Game:
             return
         
         # Check if at least one tower is required
-        if self.require_at_least_one_tower and len(self.towers) == 0:
-            self.show_message("Place at least one tower first", 2.0)
+        if self.require_at_least_one_tower and len(self.towers) == 0 and len(self.mines) == 0:
+            self.show_message("Place at least one structure first", 2.0)
             return
         
         # Calculate wave parameters
         self.enemies_per_wave, self.spawn_interval = self._calculate_wave_params(self.wave_number)
+        
+        # Set wave focus direction
+        if self.wave_focus_enabled:
+            self.wave_focus_direction = random.choice(['N', 'E', 'S', 'W'])
+        else:
+            self.wave_focus_direction = None
+        
+        # Calculate focused vs non-focused spawns
+        if self.wave_focus_enabled and self.wave_focus_direction:
+            self.focused_spawns = round(self.enemies_per_wave * self.wave_focus_majority_pct)
+            self.non_focused_spawns = self.enemies_per_wave - self.focused_spawns
+        else:
+            self.focused_spawns = 0
+            self.non_focused_spawns = self.enemies_per_wave
         
         self.phase = 'wave'
         self.wave_active = True
@@ -294,11 +425,31 @@ class Game:
         self.enemies = []
         self.last_spawn_time = 0.0
         self.wave_reward = 0
-        self.placement_mode = None  # Exit placement mode when wave starts
+        self.arrow_pulse_time = 0.0
+        self.build_mode = 'none'  # Exit placement mode when wave starts
+        self.is_selecting_tower = False
+        self.selected_tower_type = None
     
     def spawn_enemy(self):
         """Spawn a new enemy at a random edge position with scaled stats."""
-        spawn_points = self.grid.get_spawn_points()
+        # Determine if this should be a focused spawn
+        is_focused = False
+        if self.wave_focus_enabled and self.wave_focus_direction and self.focused_spawns > 0:
+            if self.enemies_spawned < self.focused_spawns:
+                is_focused = True
+        
+        # Get spawn points
+        if is_focused:
+            spawn_points = self._get_focused_spawn_points(self.wave_focus_direction)
+        else:
+            # Non-focused: can spawn from any edge except the focused one (or all if no focus)
+            if self.wave_focus_enabled and self.wave_focus_direction:
+                all_points = self.grid.get_spawn_points()
+                focused_points = self._get_focused_spawn_points(self.wave_focus_direction)
+                spawn_points = [p for p in all_points if p not in focused_points]
+            else:
+                spawn_points = self.grid.get_spawn_points()
+        
         if not spawn_points:
             return
         
@@ -332,6 +483,23 @@ class Game:
         )
         self.enemies.append(enemy)
         self.enemies_spawned += 1
+    
+    def _get_focused_spawn_points(self, direction):
+        """Get spawn points for a specific direction (N, E, S, W)."""
+        all_points = self.grid.get_spawn_points()
+        focused = []
+        
+        for x, y in all_points:
+            if direction == 'N' and y == 0:  # Top edge
+                focused.append((x, y))
+            elif direction == 'S' and y == self.grid_size - 1:  # Bottom edge
+                focused.append((x, y))
+            elif direction == 'W' and x == 0:  # Left edge
+                focused.append((x, y))
+            elif direction == 'E' and x == self.grid_size - 1:  # Right edge
+                focused.append((x, y))
+        
+        return focused
     
     def complete_wave(self):
         """Complete the wave, give mining reward, and degrade the core."""
@@ -370,6 +538,10 @@ class Game:
             if self.ui_message_timer <= 0:
                 self.ui_message = None
         
+        # Update arrow pulse animation
+        if self.wave_active and self.wave_focus_arrow_pulse:
+            self.arrow_pulse_time += dt
+        
         if not self.wave_active:
             return
         
@@ -388,6 +560,12 @@ class Game:
         # Update towers
         for tower in self.towers:
             tower.update(dt, self.enemies)
+        
+        # Update mines
+        for mine in self.mines[:]:  # Use slice to safely remove during iteration
+            mine.update(dt, self.enemies)
+            if mine.is_consumed():
+                self.mines.remove(mine)
         
         # Check wave completion - auto-advance to wave_complete phase
         if (self.enemies_spawned >= self.enemies_per_wave and
@@ -446,8 +624,22 @@ class Game:
             enemy.x = enemy_x_orig
             enemy.y = enemy_y_orig
         
+        # Render mines to map surface
+        for mine in self.mines:
+            mine_x_orig = mine.x
+            mine_y_orig = mine.y
+            mine.x -= self.map_origin_x
+            mine.y -= self.map_origin_y
+            mine.render(map_surface)
+            mine.x = mine_x_orig
+            mine.y = mine_y_orig
+        
         # Blit map surface to screen at offset
         self.screen.blit(map_surface, (self.map_origin_x, self.map_origin_y))
+        
+        # Render focus direction arrows (on screen, not map surface)
+        if self.wave_active and self.wave_focus_enabled and self.wave_focus_direction:
+            self.render_focus_arrows()
         
         # Render hover preview (uses screen coordinates)
         self.render_hover_preview()
@@ -456,6 +648,59 @@ class Game:
         self.render_sidebar()
         
         pygame.display.flip()
+    
+    def render_focus_arrows(self):
+        """Render arrows indicating the wave focus direction."""
+        arrow_size = 15
+        arrow_color = (255, 200, 0)
+        
+        # Pulse effect
+        pulse_alpha = 1.0
+        if self.wave_focus_arrow_pulse:
+            pulse_alpha = 0.7 + 0.3 * math.sin(self.arrow_pulse_time * 3.0)
+        
+        # Calculate arrow positions based on direction
+        map_width = self.grid.width
+        map_height = self.grid.height
+        arrow_spacing = map_width // (self.wave_focus_arrow_count + 1)
+        
+        for i in range(self.wave_focus_arrow_count):
+            if self.wave_focus_direction == 'N':  # Top edge, pointing down
+                x = self.map_origin_x + arrow_spacing * (i + 1)
+                y = self.map_origin_y + 5
+                points = [
+                    (x, y),
+                    (x - arrow_size // 2, y + arrow_size),
+                    (x + arrow_size // 2, y + arrow_size)
+                ]
+            elif self.wave_focus_direction == 'S':  # Bottom edge, pointing up
+                x = self.map_origin_x + arrow_spacing * (i + 1)
+                y = self.map_origin_y + map_height - 5
+                points = [
+                    (x, y),
+                    (x - arrow_size // 2, y - arrow_size),
+                    (x + arrow_size // 2, y - arrow_size)
+                ]
+            elif self.wave_focus_direction == 'W':  # Left edge, pointing right
+                x = self.map_origin_x + 5
+                y = self.map_origin_y + arrow_spacing * (i + 1)
+                points = [
+                    (x, y),
+                    (x + arrow_size, y - arrow_size // 2),
+                    (x + arrow_size, y + arrow_size // 2)
+                ]
+            else:  # 'E' - Right edge, pointing left
+                x = self.map_origin_x + map_width - 5
+                y = self.map_origin_y + arrow_spacing * (i + 1)
+                points = [
+                    (x, y),
+                    (x - arrow_size, y - arrow_size // 2),
+                    (x - arrow_size, y + arrow_size // 2)
+                ]
+            
+            # Draw arrow with pulse
+            color = tuple(int(c * pulse_alpha) for c in arrow_color)
+            pygame.draw.polygon(self.screen, color, points)
     
     def render_sidebar(self):
         """Render the sidebar panel with all UI text."""
@@ -498,6 +743,35 @@ class Game:
         mode_text = small_font.render(f"Mode: {self.get_mode_text()}", True, (180, 180, 180))
         self.screen.blit(mode_text, (x, y))
         y += 35
+        
+        # Tower selection UI
+        if self.is_selecting_tower:
+            y += 5
+            select_title = font.render("Select Tower:", True, (255, 255, 255))
+            self.screen.blit(select_title, (x, y))
+            y += 25
+            
+            # Basic Tower
+            tower_data = self.tower_config['basic_tower']
+            tower_name = tower_data.get('name', 'Basic Tower')
+            tower_cost = tower_data['cost']
+            tower_text = small_font.render(f"1 - {tower_name} ({tower_cost})", True, (200, 200, 255))
+            self.screen.blit(tower_text, (x + 10, y))
+            y += 22
+            
+            # Mine
+            mine_data = self.tower_config['mine']
+            mine_name = mine_data.get('name', 'Mine')
+            mine_cost = mine_data['cost']
+            mine_text = small_font.render(f"2 - {mine_name} ({mine_cost})", True, (255, 200, 100))
+            self.screen.blit(mine_text, (x + 10, y))
+            y += 30
+        
+        # Wave focus direction
+        if self.wave_active and self.wave_focus_enabled and self.wave_focus_direction:
+            focus_text = small_font.render(f"Wave Focus: {self.wave_focus_direction}", True, (255, 200, 100))
+            self.screen.blit(focus_text, (x, y))
+            y += 25
         
         # Next wave preview (only in build phase)
         if self.phase == 'build':
@@ -547,10 +821,11 @@ class Game:
         # Controls
         controls = [
             "Controls:",
-            "T - Place Tower",
-            "X - Sell Tower",
+            "T - Select Tower",
+            "1/2 - Choose Type",
+            "X - Sell Structure",
             "SPACE - Start/Complete",
-            "ESC - Quit"
+            "ESC - Cancel/Quit"
         ]
         
         for control in controls:
@@ -578,15 +853,24 @@ class Game:
         """Get text description of current mode."""
         if self.phase == 'wave':
             return "Wave"
-        elif self.placement_mode == 'tower':
-            return "Build (Place)"
-        elif self.placement_mode == 'delete':
+        elif self.phase == 'wave_complete':
+            return "Wave Complete"
+        elif self.build_mode == 'place':
+            if self.selected_tower_type == 'mine':
+                return "Build (Place Mine)"
+            elif self.selected_tower_type == 'basic_tower':
+                return "Build (Place Tower)"
+            else:
+                return "Build (Place)"
+        elif self.build_mode == 'sell':
             return "Build (Sell)"
+        elif self.build_mode == 'select':
+            return "Build (Select)"
         else:
             return "Build"
     
     def render_hover_preview(self):
-        """Render hover preview for tower placement."""
+        """Render hover preview for tower/mine placement."""
         if self.phase != 'build':
             return
         
@@ -602,39 +886,79 @@ class Game:
                 self.map_origin_y <= self.mouse_pos[1] < self.map_origin_y + self.grid.height):
             return
         
-        if self.placement_mode == 'tower':
-            # Check if position is valid
-            can_place = self.can_place_tower(grid_x, grid_y)
-            tower_data = self.tower_config[self.selected_tower_type]
+        if self.build_mode == 'place':
+            if not self.selected_tower_type:
+                return
+            
             tower_x, tower_y = self._grid_to_screen_pixel(grid_x, grid_y)
             
-            # Draw preview circle
-            if can_place:
-                # Valid placement - green outline
-                pygame.draw.circle(self.screen, (100, 255, 100), 
-                                 (tower_x, tower_y), tower_data['size'], 2)
-            else:
-                # Invalid placement - red outline or X
-                pygame.draw.circle(self.screen, (255, 100, 100), 
-                                 (tower_x, tower_y), tower_data['size'], 2)
+            if self.selected_tower_type == 'mine':
+                # Mine preview
+                can_place = self.can_place_mine(grid_x, grid_y)
+                mine_data = self.tower_config['mine']
+                radius_pixels = mine_data['radius_tiles'] * self.tile_size
                 
-                # Draw X marker
-                size = tower_data['size']
-                pygame.draw.line(self.screen, (255, 0, 0), 
-                               (tower_x - size, tower_y - size),
-                               (tower_x + size, tower_y + size), 2)
-                pygame.draw.line(self.screen, (255, 0, 0), 
-                               (tower_x - size, tower_y + size),
-                               (tower_x + size, tower_y - size), 2)
+                if can_place:
+                    # Valid placement - green outline
+                    pygame.draw.circle(self.screen, (100, 255, 100), 
+                                     (tower_x, tower_y), mine_data['size'], 2)
+                    pygame.draw.circle(self.screen, (100, 255, 100), 
+                                     (tower_x, tower_y), int(radius_pixels), 1)
+                else:
+                    # Invalid placement - red outline or X
+                    pygame.draw.circle(self.screen, (255, 100, 100), 
+                                     (tower_x, tower_y), mine_data['size'], 2)
+                    pygame.draw.circle(self.screen, (255, 100, 100), 
+                                     (tower_x, tower_y), int(radius_pixels), 1)
+                    
+                    # Draw X marker
+                    size = mine_data['size']
+                    pygame.draw.line(self.screen, (255, 0, 0), 
+                                   (tower_x - size, tower_y - size),
+                                   (tower_x + size, tower_y + size), 2)
+                    pygame.draw.line(self.screen, (255, 0, 0), 
+                                   (tower_x - size, tower_y + size),
+                                   (tower_x + size, tower_y - size), 2)
+            else:  # basic_tower
+                # Check if position is valid
+                can_place = self.can_place_tower(grid_x, grid_y)
+                tower_data = self.tower_config[self.selected_tower_type]
+                
+                # Draw preview circle
+                if can_place:
+                    # Valid placement - green outline
+                    pygame.draw.circle(self.screen, (100, 255, 100), 
+                                     (tower_x, tower_y), tower_data['size'], 2)
+                else:
+                    # Invalid placement - red outline or X
+                    pygame.draw.circle(self.screen, (255, 100, 100), 
+                                     (tower_x, tower_y), tower_data['size'], 2)
+                    
+                    # Draw X marker
+                    size = tower_data['size']
+                    pygame.draw.line(self.screen, (255, 0, 0), 
+                                   (tower_x - size, tower_y - size),
+                                   (tower_x + size, tower_y + size), 2)
+                    pygame.draw.line(self.screen, (255, 0, 0), 
+                                   (tower_x - size, tower_y + size),
+                                   (tower_x + size, tower_y - size), 2)
         
-        elif self.placement_mode == 'delete':
-            tower = self.get_tower_at_position(grid_x, grid_y)
-            tower_x, tower_y = self._grid_to_screen_pixel(grid_x, grid_y)
+        elif self.build_mode == 'sell':
+            struct_x, struct_y = self._grid_to_screen_pixel(grid_x, grid_y)
             
+            # Check for tower
+            tower = self.get_tower_at_position(grid_x, grid_y)
             if tower:
-                # Tower found - show sell preview (red highlight)
                 pygame.draw.circle(self.screen, (255, 100, 100), 
-                                 (tower_x, tower_y), tower.size + 5, 2)
+                                 (struct_x, struct_y), tower.size + 5, 2)
+            else:
+                # Check for mine
+                for mine in self.mines:
+                    m_x, m_y = mine.get_position()
+                    if abs(m_x - struct_x) < 1 and abs(m_y - struct_y) < 1:
+                        pygame.draw.circle(self.screen, (255, 100, 100), 
+                                         (struct_x, struct_y), mine.size + 5, 2)
+                        break
     
     def run(self):
         """Run the main game loop."""

@@ -1,11 +1,22 @@
 {
   "basic_tower": {
+    "name": "Basic Tower",
     "damage": 25,
     "range": 80,
     "cooldown": 1.0,
     "cost": 25,
     "color": [0, 100, 255],
     "size": 12
+  },
+  "mine": {
+    "name": "Mine",
+    "cost": 12,
+    "radius_tiles": 1.5,
+    "damage": 50,
+    "trigger_mode": "proximity",
+    "one_use": true,
+    "color": [255, 150, 0],
+    "size": 8
   }
 }
 
