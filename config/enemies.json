@@ -1,0 +1,10 @@
+{
+  "basic_enemy": {
+    "health": 100,
+    "speed": 1.0,
+    "damage": 10,
+    "color": [255, 0, 0],
+    "size": 8
+  }
+}
+

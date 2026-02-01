@@ -1,0 +1,12 @@
+{
+  "default": {
+    "name": "Default",
+    "enemy_modifier": {
+      "speed": 1.0,
+      "armor": 1.0,
+      "swarm": 1.0
+    },
+    "terrain_color": [100, 150, 100]
+  }
+}
+

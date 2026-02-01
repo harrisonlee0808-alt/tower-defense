@@ -1,0 +1,15 @@
+{
+  "grid_size": 16,
+  "tile_size": 40,
+  "core": {
+    "max_integrity": 100,
+    "integrity_loss_per_wave": 10,
+    "color": [255, 255, 0],
+    "size": 20
+  },
+  "waves": {
+    "enemies_per_wave": 5,
+    "spawn_interval": 1.0
+  }
+}
+
