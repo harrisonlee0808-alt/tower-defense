@@ -72,7 +72,13 @@ class Game:
         self.last_spawn_time = 0.0
         self.wave_reward = 0  # Reward for current wave
         
-        # Wave focus direction
+        # Occupancy grid for multi-tile buildings
+        # None = empty, else = building object reference
+        self.occupancy_grid = [[None for _ in range(self.grid_size)] for _ in range(self.grid_size)]
+        self.next_building_id = 1
+        self.core_original_max_integrity = 0
+        
+        # Wave focus direction (determined at start of build phase)
         self.wave_focus_direction = None  # 'N', 'E', 'S', 'W'
         wave_focus_config = self.game_config.get('wave_focus', {})
         self.wave_focus_enabled = wave_focus_config.get('enabled', False)
@@ -80,6 +86,26 @@ class Game:
         self.wave_focus_arrow_count = wave_focus_config.get('arrow_count', 3)
         self.wave_focus_arrow_pulse = wave_focus_config.get('arrow_pulse', True)
         self.arrow_pulse_time = 0.0
+        
+        # Pre-wave preview
+        preview_config = self.game_config.get('preview_incoming', {})
+        self.preview_enabled = preview_config.get('enabled', True)
+        self.preview_marker_count = preview_config.get('marker_count', 6)
+        self.preview_show_in_build = preview_config.get('show_in_build_phase', True)
+        
+        # Wave countdown
+        countdown_config = self.game_config.get('wave_countdown', {})
+        self.countdown_enabled = countdown_config.get('enabled', True)
+        self.countdown_duration = countdown_config.get('duration', 3.0)
+        self.countdown_timer = 0.0
+        self.countdown_active = False
+        
+        # Emergency repair
+        repair_config = self.game_config.get('emergency_repair', {})
+        self.repair_enabled = repair_config.get('enabled', True)
+        self.repair_cost = repair_config.get('cost', 30)
+        self.repair_amount = repair_config.get('restore_amount', 20)
+        self.repair_used = False
         
         # Economy
         self.currency_name = self.game_config['currency_name']
@@ -113,11 +139,21 @@ class Game:
     def _initialize_game(self):
         """Initialize the game state."""
         # Place core in center
+        core_config = self.game_config['core']
+        core_footprint_w = core_config.get('footprint_w', 3)
+        core_footprint_h = core_config.get('footprint_h', 3)
+        
+        # Center the core footprint
         center_x = self.grid_size // 2
         center_y = self.grid_size // 2
-        core_x, core_y = self._grid_to_screen_pixel(center_x, center_y)
+        core_origin_x = center_x - core_footprint_w // 2
+        core_origin_y = center_y - core_footprint_h // 2
         
-        core_config = self.game_config['core']
+        # Get center pixel position
+        core_center_x = center_x
+        core_center_y = center_y
+        core_x, core_y = self._grid_to_screen_pixel(core_center_x, core_center_y)
+        
         self.core = EnergyCore(
             core_x, core_y,
             core_config['max_integrity'],
@@ -125,9 +161,26 @@ class Game:
             core_config['size'],
             tuple(core_config['color'])
         )
+        self.core_original_max_integrity = core_config['max_integrity']
         
-        # Mark core tile as occupied
-        self.grid.set_tile(center_x, center_y, 0)
+        # Store footprint info on core
+        self.core.origin_tile = (core_origin_x, core_origin_y)
+        self.core.footprint_w = core_footprint_w
+        self.core.footprint_h = core_footprint_h
+        self.core.occupied_tiles = []
+        
+        # Mark all core tiles as occupied
+        for dy in range(core_footprint_h):
+            for dx in range(core_footprint_w):
+                tile_x = core_origin_x + dx
+                tile_y = core_origin_y + dy
+                if 0 <= tile_x < self.grid_size and 0 <= tile_y < self.grid_size:
+                    self.grid.set_tile(tile_x, tile_y, 0)
+                    self.occupancy_grid[tile_y][tile_x] = self.core
+                    self.core.occupied_tiles.append((tile_x, tile_y))
+        
+        # Set next wave focus direction for preview
+        self._set_next_wave_focus()
     
     def _grid_to_screen_pixel(self, grid_x, grid_y):
         """Convert grid coordinates to screen pixel coordinates (with map offset)."""
@@ -141,6 +194,13 @@ class Game:
         map_y = screen_y - self.map_origin_y
         return self.grid.pixel_to_grid(map_x, map_y)
     
+    def _set_next_wave_focus(self):
+        """Set the focus direction for the next wave (for preview)."""
+        if self.wave_focus_enabled:
+            self.wave_focus_direction = random.choice(['N', 'E', 'S', 'W'])
+        else:
+            self.wave_focus_direction = None
+    
     def _calculate_wave_params(self, wave_num):
         """Calculate wave parameters based on wave number."""
         scaling = self.game_config['wave_scaling']
@@ -152,7 +212,15 @@ class Game:
         spawn_interval = scaling['base_spawn_interval'] - (wave_num - 1) * scaling['spawn_interval_decay']
         spawn_interval = max(scaling['min_spawn_interval'], spawn_interval)
         
-        return enemy_count, spawn_interval
+        # Enemy mix ratios
+        heavy_ratio_base = scaling.get('heavy_ratio_base', 0.25)
+        heavy_ratio_growth = scaling.get('heavy_ratio_growth', 0.01)
+        heavy_ratio_max = scaling.get('heavy_ratio_max', 0.6)
+        heavy_ratio = min(heavy_ratio_max, heavy_ratio_base + (wave_num - 1) * heavy_ratio_growth)
+        heavy_count = round(enemy_count * heavy_ratio)
+        light_count = enemy_count - heavy_count
+        
+        return enemy_count, spawn_interval, heavy_count, light_count
     
     def handle_events(self):
         """Handle pygame events."""
@@ -201,10 +269,13 @@ class Game:
                             self.is_selecting_tower = False
                             self.selected_tower_type = None
                 elif event.key == pygame.K_SPACE:
-                    if self.phase == 'build' and not self.wave_active and not self.wave_complete:
+                    if self.phase == 'build' and not self.wave_active and not self.wave_complete and not self.countdown_active:
                         self.start_wave()
                     elif self.phase == 'wave_complete':
                         self.complete_wave()
+                elif event.key == pygame.K_r:
+                    if self.phase == 'build' and not self.countdown_active:
+                        self.emergency_repair()
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:  # Left click
                     self.handle_placement(event.pos)
@@ -249,12 +320,48 @@ class Game:
             
             self.sell_structure(grid_x, grid_y)
     
-    def can_place_tower(self, grid_x, grid_y):
-        """Check if a tower can be placed at the given grid position."""
-        if self.phase != 'build':
-            return False
+    def _get_footprint_tiles(self, origin_x, origin_y, footprint_w, footprint_h):
+        """Get list of tiles in a footprint."""
+        tiles = []
+        for dy in range(footprint_h):
+            for dx in range(footprint_w):
+                tile_x = origin_x + dx
+                tile_y = origin_y + dy
+                if 0 <= tile_x < self.grid_size and 0 <= tile_y < self.grid_size:
+                    tiles.append((tile_x, tile_y))
+        return tiles
+    
+    def _can_place_footprint(self, origin_x, origin_y, footprint_w, footprint_h):
+        """Check if a footprint can be placed (all tiles buildable and empty)."""
+        tiles = self._get_footprint_tiles(origin_x, origin_y, footprint_w, footprint_h)
         
-        if not self.grid.is_buildable(grid_x, grid_y):
+        for tile_x, tile_y in tiles:
+            if not self.grid.is_buildable(tile_x, tile_y):
+                return False
+            if self.occupancy_grid[tile_y][tile_x] is not None:
+                return False
+        
+        return True
+    
+    def _mark_footprint_occupied(self, origin_x, origin_y, footprint_w, footprint_h, building):
+        """Mark all tiles in a footprint as occupied by a building."""
+        tiles = self._get_footprint_tiles(origin_x, origin_y, footprint_w, footprint_h)
+        building.occupied_tiles = tiles
+        
+        for tile_x, tile_y in tiles:
+            self.grid.set_tile(tile_x, tile_y, 0)
+            self.occupancy_grid[tile_y][tile_x] = building
+    
+    def _clear_footprint(self, building):
+        """Clear a building's footprint from the occupancy grid."""
+        for tile_x, tile_y in building.occupied_tiles:
+            self.grid.set_tile(tile_x, tile_y, 1)
+            self.occupancy_grid[tile_y][tile_x] = None
+        building.occupied_tiles = []
+    
+    def can_place_tower(self, grid_x, grid_y):
+        """Check if a tower can be placed at the given grid position (top-left of footprint)."""
+        if self.phase != 'build' or self.countdown_active:
             return False
         
         if not self.selected_tower_type or self.selected_tower_type not in self.tower_config:
@@ -264,48 +371,35 @@ class Game:
         if self.energy < tower_data['cost']:
             return False
         
-        # Check if there's already a structure at this position
-        tower_x, tower_y = self._grid_to_screen_pixel(grid_x, grid_y)
-        for tower in self.towers:
-            t_x, t_y = tower.get_position()
-            if abs(t_x - tower_x) < 1 and abs(t_y - tower_y) < 1:
-                return False
-        for mine in self.mines:
-            m_x, m_y = mine.get_position()
-            if abs(m_x - tower_x) < 1 and abs(m_y - tower_y) < 1:
-                return False
+        footprint_w = tower_data.get('footprint_w', 1)
+        footprint_h = tower_data.get('footprint_h', 1)
         
-        return True
+        return self._can_place_footprint(grid_x, grid_y, footprint_w, footprint_h)
     
     def can_place_mine(self, grid_x, grid_y):
-        """Check if a mine can be placed at the given grid position."""
-        if self.phase != 'build':
-            return False
-        
-        if not self.grid.is_buildable(grid_x, grid_y):
+        """Check if a mine can be placed at the given grid position (top-left of footprint)."""
+        if self.phase != 'build' or self.countdown_active:
             return False
         
         mine_data = self.tower_config['mine']
         if self.energy < mine_data['cost']:
             return False
         
-        # Check if there's already a structure at this position
-        mine_x, mine_y = self._grid_to_screen_pixel(grid_x, grid_y)
-        for tower in self.towers:
-            t_x, t_y = tower.get_position()
-            if abs(t_x - mine_x) < 1 and abs(t_y - mine_y) < 1:
-                return False
-        for mine in self.mines:
-            m_x, m_y = mine.get_position()
-            if abs(m_x - mine_x) < 1 and abs(m_y - mine_y) < 1:
-                return False
+        footprint_w = mine_data.get('footprint_w', 1)
+        footprint_h = mine_data.get('footprint_h', 1)
         
-        return True
+        return self._can_place_footprint(grid_x, grid_y, footprint_w, footprint_h)
     
     def place_tower(self, grid_x, grid_y):
-        """Place a tower at the given grid position."""
-        tower_x, tower_y = self._grid_to_screen_pixel(grid_x, grid_y)
+        """Place a tower at the given grid position (top-left of footprint)."""
         tower_data = self.tower_config[self.selected_tower_type]
+        footprint_w = tower_data.get('footprint_w', 1)
+        footprint_h = tower_data.get('footprint_h', 1)
+        
+        # Calculate center position for rendering
+        center_grid_x = grid_x + footprint_w // 2
+        center_grid_y = grid_y + footprint_h // 2
+        tower_x, tower_y = self._grid_to_screen_pixel(center_grid_x, center_grid_y)
         
         tower = DefenseTower(
             tower_x, tower_y,
@@ -316,15 +410,30 @@ class Game:
             tuple(tower_data['color']),
             tower_data['cost']
         )
+        
+        # Store footprint info
+        tower.origin_tile = (grid_x, grid_y)
+        tower.footprint_w = footprint_w
+        tower.footprint_h = footprint_h
+        tower.occupied_tiles = []
+        
+        # Mark footprint as occupied
+        self._mark_footprint_occupied(grid_x, grid_y, footprint_w, footprint_h, tower)
+        
         self.towers.append(tower)
-        self.grid.set_tile(grid_x, grid_y, 0)
         self.energy -= tower_data['cost']
         # Keep in place mode after placing (don't exit)
     
     def place_mine(self, grid_x, grid_y):
-        """Place a mine at the given grid position."""
-        mine_x, mine_y = self._grid_to_screen_pixel(grid_x, grid_y)
+        """Place a mine at the given grid position (top-left of footprint)."""
         mine_data = self.tower_config['mine']
+        footprint_w = mine_data.get('footprint_w', 1)
+        footprint_h = mine_data.get('footprint_h', 1)
+        
+        # Calculate center position for rendering
+        center_grid_x = grid_x + footprint_w // 2
+        center_grid_y = grid_y + footprint_h // 2
+        mine_x, mine_y = self._grid_to_screen_pixel(center_grid_x, center_grid_y)
         
         mine = Mine(
             mine_x, mine_y,
@@ -335,47 +444,48 @@ class Game:
             tuple(mine_data['color']),
             mine_data['cost']
         )
+        
+        # Store footprint info
+        mine.origin_tile = (grid_x, grid_y)
+        mine.footprint_w = footprint_w
+        mine.footprint_h = footprint_h
+        mine.occupied_tiles = []
+        
+        # Mark footprint as occupied
+        self._mark_footprint_occupied(grid_x, grid_y, footprint_w, footprint_h, mine)
+        
         self.mines.append(mine)
-        self.grid.set_tile(grid_x, grid_y, 0)
         self.energy -= mine_data['cost']
         # Keep in place mode after placing (don't exit)
     
     def sell_structure(self, grid_x, grid_y):
-        """Sell a tower or mine at the given grid position."""
-        struct_x, struct_y = self._grid_to_screen_pixel(grid_x, grid_y)
+        """Sell a tower or mine at the given grid position (any tile in footprint)."""
+        # Check occupancy grid to find building
+        if not (0 <= grid_x < self.grid_size and 0 <= grid_y < self.grid_size):
+            return
         
-        # Find tower at this position
-        for i, tower in enumerate(self.towers):
-            t_x, t_y = tower.get_position()
-            if abs(t_x - struct_x) < 1 and abs(t_y - struct_y) < 1:
-                # Calculate refund
-                refund = int(tower.cost * self.sell_refund_pct)
-                self.energy += refund
-                
-                # Remove tower
-                self.towers.pop(i)
-                
-                # Free the tile
-                self.grid.set_tile(grid_x, grid_y, 1)
-                return
+        building = self.occupancy_grid[grid_y][grid_x]
+        if building is None:
+            self.show_message("No structure here", 1.0)
+            return
         
-        # Find mine at this position
-        for i, mine in enumerate(self.mines):
-            m_x, m_y = mine.get_position()
-            if abs(m_x - struct_x) < 1 and abs(m_y - struct_y) < 1:
-                # Calculate refund
-                refund = int(mine.cost * self.sell_refund_pct)
-                self.energy += refund
-                
-                # Remove mine
-                self.mines.pop(i)
-                
-                # Free the tile
-                self.grid.set_tile(grid_x, grid_y, 1)
-                return
+        # Don't allow selling core
+        if building == self.core:
+            self.show_message("Cannot sell core", 1.0)
+            return
         
-        # No structure found at this position
-        self.show_message("No structure here", 1.0)
+        # Calculate refund
+        refund = int(building.cost * self.sell_refund_pct)
+        self.energy += refund
+        
+        # Remove from appropriate list
+        if building in self.towers:
+            self.towers.remove(building)
+        elif building in self.mines:
+            self.mines.remove(building)
+        
+        # Clear footprint
+        self._clear_footprint(building)
     
     def show_message(self, message, duration=2.0):
         """Show a temporary UI message."""
@@ -392,8 +502,8 @@ class Game:
         return None
     
     def start_wave(self):
-        """Start a new enemy wave."""
-        if self.wave_active:
+        """Start a new enemy wave (with countdown if enabled)."""
+        if self.wave_active or self.countdown_active:
             return
         
         # Check if at least one tower is required
@@ -402,13 +512,15 @@ class Game:
             return
         
         # Calculate wave parameters
-        self.enemies_per_wave, self.spawn_interval = self._calculate_wave_params(self.wave_number)
+        self.enemies_per_wave, self.spawn_interval, self.heavy_count, self.light_count = self._calculate_wave_params(self.wave_number)
         
-        # Set wave focus direction
-        if self.wave_focus_enabled:
-            self.wave_focus_direction = random.choice(['N', 'E', 'S', 'W'])
-        else:
-            self.wave_focus_direction = None
+        # Create enemy type list (interleaved)
+        self.enemy_spawn_queue = []
+        total = self.heavy_count + self.light_count
+        heavy_indices = set(random.sample(range(total), self.heavy_count))
+        for i in range(total):
+            self.enemy_spawn_queue.append('heavy' if i in heavy_indices else 'light')
+        random.shuffle(self.enemy_spawn_queue)
         
         # Calculate focused vs non-focused spawns
         if self.wave_focus_enabled and self.wave_focus_direction:
@@ -418,6 +530,17 @@ class Game:
             self.focused_spawns = 0
             self.non_focused_spawns = self.enemies_per_wave
         
+        # Start countdown if enabled
+        if self.countdown_enabled:
+            self.countdown_active = True
+            self.countdown_timer = self.countdown_duration
+            self.build_mode = 'none'
+            self.is_selecting_tower = False
+        else:
+            self._begin_wave_spawning()
+    
+    def _begin_wave_spawning(self):
+        """Actually begin the wave (called after countdown)."""
         self.phase = 'wave'
         self.wave_active = True
         self.wave_complete = False
@@ -456,8 +579,14 @@ class Game:
         spawn_point = random.choice(spawn_points)
         spawn_x, spawn_y = self._grid_to_screen_pixel(spawn_point[0], spawn_point[1])
         
+        # Get enemy type from queue
+        if self.enemies_spawned < len(self.enemy_spawn_queue):
+            enemy_type = self.enemy_spawn_queue[self.enemies_spawned]
+        else:
+            enemy_type = 'light'  # Fallback
+        
         # Get base enemy stats
-        enemy_data = self.enemy_config['basic_enemy']
+        enemy_data = self.enemy_config[enemy_type]
         base_health = enemy_data['health']
         base_speed = enemy_data['speed']
         base_damage = enemy_data['damage']
@@ -481,6 +610,7 @@ class Game:
             enemy_data['size'],
             tuple(enemy_data['color'])
         )
+        enemy.enemy_type = enemy_type  # Store type for UI
         self.enemies.append(enemy)
         self.enemies_spawned += 1
     
@@ -501,17 +631,38 @@ class Game:
         
         return focused
     
+    def emergency_repair(self):
+        """Emergency repair - restore core HP once per base."""
+        if self.repair_used:
+            self.show_message("Repair already used", 2.0)
+            return
+        
+        if self.energy < self.repair_cost:
+            self.show_message("Not enough energy", 2.0)
+            return
+        
+        self.core.current_integrity = min(self.core.max_integrity, 
+                                          self.core.current_integrity + self.repair_amount)
+        self.energy -= self.repair_cost
+        self.repair_used = True
+        self.show_message(f"Repaired +{self.repair_amount} HP", 2.0)
+    
     def complete_wave(self):
         """Complete the wave, give mining reward, and degrade the core."""
         if not self.wave_complete:
             return
         
-        # Calculate and give mining reward (for the wave that just completed)
+        # Calculate base mining reward
         mining_config = self.game_config['core_mining']
         reward = mining_config['reward_base'] + (self.wave_number - 1) * mining_config['reward_growth']
         
         if 'reward_multiplier_per_wave' in mining_config:
             reward = round(reward * (mining_config['reward_multiplier_per_wave'] ** (self.wave_number - 1)))
+        
+        # Apply mining efficiency based on core integrity
+        if self.core_original_max_integrity > 0:
+            efficiency = self.core.max_integrity / self.core_original_max_integrity
+            reward = round(reward * efficiency)
         
         self.energy += reward
         
@@ -520,6 +671,9 @@ class Game:
         
         # Advance to next wave
         self.wave_number += 1
+        
+        # Set next wave focus for preview
+        self._set_next_wave_focus()
         
         self.phase = 'build'
         self.wave_active = False
@@ -538,8 +692,16 @@ class Game:
             if self.ui_message_timer <= 0:
                 self.ui_message = None
         
+        # Update countdown
+        if self.countdown_active:
+            self.countdown_timer -= dt
+            if self.countdown_timer <= 0:
+                self.countdown_active = False
+                self._begin_wave_spawning()
+            return  # Don't update game during countdown
+        
         # Update arrow pulse animation
-        if self.wave_active and self.wave_focus_arrow_pulse:
+        if (self.wave_active or (self.preview_show_in_build and self.phase == 'build')) and self.wave_focus_arrow_pulse:
             self.arrow_pulse_time += dt
         
         if not self.wave_active:
@@ -574,11 +736,15 @@ class Game:
                 self.wave_complete = True
                 self.phase = 'wave_complete'
                 
-                # Calculate mining reward for display
+                # Calculate mining reward for display (with efficiency)
                 mining_config = self.game_config['core_mining']
                 reward = mining_config['reward_base'] + (self.wave_number - 1) * mining_config['reward_growth']
                 if 'reward_multiplier_per_wave' in mining_config:
                     reward = round(reward * (mining_config['reward_multiplier_per_wave'] ** (self.wave_number - 1)))
+                # Apply mining efficiency
+                if self.core_original_max_integrity > 0:
+                    efficiency = self.core.max_integrity / self.core_original_max_integrity
+                    reward = round(reward * efficiency)
                 self.wave_reward = reward
                 
                 print(f"Wave complete! Core integrity: {self.core.current_integrity}/{self.core.max_integrity}")
@@ -637,9 +803,12 @@ class Game:
         # Blit map surface to screen at offset
         self.screen.blit(map_surface, (self.map_origin_x, self.map_origin_y))
         
-        # Render focus direction arrows (on screen, not map surface)
+        # Render focus direction arrows (during wave or preview in build phase)
         if self.wave_active and self.wave_focus_enabled and self.wave_focus_direction:
             self.render_focus_arrows()
+        elif self.preview_show_in_build and self.phase == 'build' and self.wave_focus_enabled and self.wave_focus_direction:
+            self.render_preview_arrows()
+            self.render_preview_markers()
         
         # Render hover preview (uses screen coordinates)
         self.render_hover_preview()
@@ -701,6 +870,59 @@ class Game:
             # Draw arrow with pulse
             color = tuple(int(c * pulse_alpha) for c in arrow_color)
             pygame.draw.polygon(self.screen, color, points)
+    
+    def render_preview_arrows(self):
+        """Render preview arrows for incoming wave (lighter color, labeled)."""
+        arrow_size = 12
+        arrow_color = (200, 200, 100)  # Lighter yellow for preview
+        
+        # Pulse effect (subtle)
+        pulse_alpha = 0.6 + 0.2 * math.sin(self.arrow_pulse_time * 2.0)
+        
+        map_width = self.grid.width
+        map_height = self.grid.height
+        arrow_spacing = map_width // (self.wave_focus_arrow_count + 1)
+        
+        for i in range(self.wave_focus_arrow_count):
+            if self.wave_focus_direction == 'N':
+                x = self.map_origin_x + arrow_spacing * (i + 1)
+                y = self.map_origin_y + 5
+                points = [(x, y), (x - arrow_size // 2, y + arrow_size), (x + arrow_size // 2, y + arrow_size)]
+            elif self.wave_focus_direction == 'S':
+                x = self.map_origin_x + arrow_spacing * (i + 1)
+                y = self.map_origin_y + map_height - 5
+                points = [(x, y), (x - arrow_size // 2, y - arrow_size), (x + arrow_size // 2, y - arrow_size)]
+            elif self.wave_focus_direction == 'W':
+                x = self.map_origin_x + 5
+                y = self.map_origin_y + arrow_spacing * (i + 1)
+                points = [(x, y), (x + arrow_size, y - arrow_size // 2), (x + arrow_size, y + arrow_size // 2)]
+            else:  # 'E'
+                x = self.map_origin_x + map_width - 5
+                y = self.map_origin_y + arrow_spacing * (i + 1)
+                points = [(x, y), (x - arrow_size, y - arrow_size // 2), (x - arrow_size, y + arrow_size // 2)]
+            
+            color = tuple(int(c * pulse_alpha) for c in arrow_color)
+            pygame.draw.polygon(self.screen, color, points)
+    
+    def render_preview_markers(self):
+        """Render spawn markers along the focused edge."""
+        marker_size = 4
+        marker_color = (150, 150, 200)
+        
+        focused_points = self._get_focused_spawn_points(self.wave_focus_direction)
+        if not focused_points:
+            return
+        
+        # Sample points along the edge
+        if len(focused_points) > self.preview_marker_count:
+            step = len(focused_points) // self.preview_marker_count
+            sample_points = focused_points[::step][:self.preview_marker_count]
+        else:
+            sample_points = focused_points
+        
+        for grid_x, grid_y in sample_points:
+            pixel_x, pixel_y = self._grid_to_screen_pixel(grid_x, grid_y)
+            pygame.draw.circle(self.screen, marker_color, (pixel_x, pixel_y), marker_size)
     
     def render_sidebar(self):
         """Render the sidebar panel with all UI text."""
@@ -773,24 +995,43 @@ class Game:
             self.screen.blit(focus_text, (x, y))
             y += 25
         
+        # Mining efficiency
+        if self.core_original_max_integrity > 0:
+            efficiency_pct = int((self.core.max_integrity / self.core_original_max_integrity) * 100)
+            efficiency_text = small_font.render(f"Mining Efficiency: {efficiency_pct}%", True, (200, 200, 255))
+            self.screen.blit(efficiency_text, (x, y))
+            y += 25
+        
+        # Countdown
+        if self.countdown_active:
+            countdown_text = font.render(f"RAID INCOMING: {int(self.countdown_timer) + 1}", True, (255, 100, 100))
+            self.screen.blit(countdown_text, (x, y))
+            y += 30
+        
         # Next wave preview (only in build phase)
-        if self.phase == 'build':
+        if self.phase == 'build' and not self.countdown_active:
             next_wave_num = self.wave_number
-            next_enemy_count, next_spawn_interval = self._calculate_wave_params(next_wave_num)
-            
-            # Get scaling multipliers for preview
-            scaling = self.game_config['wave_scaling']
-            enemy_data = self.enemy_config['basic_enemy']
-            hp_mult = scaling['enemy_hp_multiplier_per_wave']
-            base_hp = enemy_data['health']
-            preview_hp = round(base_hp * (hp_mult ** (next_wave_num - 1)))
+            next_enemy_count, next_spawn_interval, next_heavy, next_light = self._calculate_wave_params(next_wave_num)
             
             preview_texts = [
-                "Next Wave:",
+                f"Next Wave: {next_wave_num}",
                 f"  Enemies: {next_enemy_count}",
-                f"  Spawn: {next_spawn_interval:.2f}s",
-                f"  Enemy HP: {preview_hp}"
+                f"  Mix: {next_heavy}H, {next_light}L",
+                f"  Spawn: {next_spawn_interval:.2f}s"
             ]
+            
+            if self.wave_focus_enabled and self.wave_focus_direction:
+                preview_texts.append(f"  Incoming: {self.wave_focus_direction}")
+            
+            # Calculate reward preview
+            mining_config = self.game_config['core_mining']
+            reward = mining_config['reward_base'] + (next_wave_num - 1) * mining_config['reward_growth']
+            if 'reward_multiplier_per_wave' in mining_config:
+                reward = round(reward * (mining_config['reward_multiplier_per_wave'] ** (next_wave_num - 1)))
+            if self.core_original_max_integrity > 0:
+                efficiency = self.core.max_integrity / self.core_original_max_integrity
+                reward = round(reward * efficiency)
+            preview_texts.append(f"  Reward: +{reward}")
             
             for text in preview_texts:
                 preview_surface = small_font.render(text, True, (150, 150, 200))
@@ -818,12 +1059,20 @@ class Game:
         
         y += 10
         
+        # Emergency repair status
+        if self.repair_enabled:
+            repair_status = "Used" if self.repair_used else "Available"
+            repair_text = small_font.render(f"Repair: {repair_status}", True, (200, 200, 200))
+            self.screen.blit(repair_text, (x, y))
+            y += 25
+        
         # Controls
         controls = [
             "Controls:",
             "T - Select Tower",
             "1/2 - Choose Type",
             "X - Sell Structure",
+            "R - Emergency Repair",
             "SPACE - Start/Complete",
             "ESC - Cancel/Quit"
         ]
@@ -892,56 +1141,45 @@ class Game:
             
             tower_x, tower_y = self._grid_to_screen_pixel(grid_x, grid_y)
             
+            # Get footprint info
             if self.selected_tower_type == 'mine':
-                # Mine preview
                 can_place = self.can_place_mine(grid_x, grid_y)
-                mine_data = self.tower_config['mine']
-                radius_pixels = mine_data['radius_tiles'] * self.tile_size
-                
-                if can_place:
-                    # Valid placement - green outline
-                    pygame.draw.circle(self.screen, (100, 255, 100), 
-                                     (tower_x, tower_y), mine_data['size'], 2)
-                    pygame.draw.circle(self.screen, (100, 255, 100), 
-                                     (tower_x, tower_y), int(radius_pixels), 1)
-                else:
-                    # Invalid placement - red outline or X
-                    pygame.draw.circle(self.screen, (255, 100, 100), 
-                                     (tower_x, tower_y), mine_data['size'], 2)
-                    pygame.draw.circle(self.screen, (255, 100, 100), 
-                                     (tower_x, tower_y), int(radius_pixels), 1)
-                    
-                    # Draw X marker
-                    size = mine_data['size']
-                    pygame.draw.line(self.screen, (255, 0, 0), 
-                                   (tower_x - size, tower_y - size),
-                                   (tower_x + size, tower_y + size), 2)
-                    pygame.draw.line(self.screen, (255, 0, 0), 
-                                   (tower_x - size, tower_y + size),
-                                   (tower_x + size, tower_y - size), 2)
-            else:  # basic_tower
-                # Check if position is valid
+                struct_data = self.tower_config['mine']
+            else:
                 can_place = self.can_place_tower(grid_x, grid_y)
-                tower_data = self.tower_config[self.selected_tower_type]
-                
-                # Draw preview circle
-                if can_place:
-                    # Valid placement - green outline
-                    pygame.draw.circle(self.screen, (100, 255, 100), 
-                                     (tower_x, tower_y), tower_data['size'], 2)
-                else:
-                    # Invalid placement - red outline or X
-                    pygame.draw.circle(self.screen, (255, 100, 100), 
-                                     (tower_x, tower_y), tower_data['size'], 2)
-                    
-                    # Draw X marker
-                    size = tower_data['size']
-                    pygame.draw.line(self.screen, (255, 0, 0), 
-                                   (tower_x - size, tower_y - size),
-                                   (tower_x + size, tower_y + size), 2)
-                    pygame.draw.line(self.screen, (255, 0, 0), 
-                                   (tower_x - size, tower_y + size),
-                                   (tower_x + size, tower_y - size), 2)
+                struct_data = self.tower_config[self.selected_tower_type]
+            
+            footprint_w = struct_data.get('footprint_w', 1)
+            footprint_h = struct_data.get('footprint_h', 1)
+            
+            # Calculate footprint rectangle
+            origin_x, origin_y = self._grid_to_screen_pixel(grid_x, grid_y)
+            # Adjust to top-left of tile
+            origin_x -= self.tile_size // 2
+            origin_y -= self.tile_size // 2
+            footprint_rect = pygame.Rect(origin_x, origin_y, 
+                                        footprint_w * self.tile_size, 
+                                        footprint_h * self.tile_size)
+            
+            if can_place:
+                # Valid placement - green outline
+                pygame.draw.rect(self.screen, (100, 255, 100), footprint_rect, 2)
+            else:
+                # Invalid placement - red outline
+                pygame.draw.rect(self.screen, (255, 100, 100), footprint_rect, 2)
+                # Draw X marker
+                pygame.draw.line(self.screen, (255, 0, 0), 
+                               footprint_rect.topleft, footprint_rect.bottomright, 2)
+                pygame.draw.line(self.screen, (255, 0, 0), 
+                               footprint_rect.topright, footprint_rect.bottomleft, 2)
+            
+            # For mines, also show radius
+            if self.selected_tower_type == 'mine':
+                center_x = origin_x + footprint_rect.width // 2
+                center_y = origin_y + footprint_rect.height // 2
+                radius_pixels = struct_data['radius_tiles'] * self.tile_size
+                pygame.draw.circle(self.screen, (100, 255, 100) if can_place else (255, 100, 100),
+                                 (center_x, center_y), int(radius_pixels), 1)
         
         elif self.build_mode == 'sell':
             struct_x, struct_y = self._grid_to_screen_pixel(grid_x, grid_y)

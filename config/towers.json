@@ -5,6 +5,8 @@
     "range": 80,
     "cooldown": 1.0,
     "cost": 25,
+    "footprint_w": 2,
+    "footprint_h": 2,
     "color": [0, 100, 255],
     "size": 12
   },
@@ -15,6 +17,8 @@
     "damage": 50,
     "trigger_mode": "proximity",
     "one_use": true,
+    "footprint_w": 1,
+    "footprint_h": 1,
     "color": [255, 150, 0],
     "size": 8
   }

@@ -8,6 +8,8 @@
   "core": {
     "max_integrity": 100,
     "integrity_loss_per_wave": 10,
+    "footprint_w": 3,
+    "footprint_h": 3,
     "color": [255, 255, 0],
     "size": 20
   },
@@ -19,7 +21,10 @@
     "min_spawn_interval": 0.25,
     "enemy_hp_multiplier_per_wave": 1.10,
     "enemy_speed_multiplier_per_wave": 1.03,
-    "enemy_damage_multiplier_per_wave": 1.02
+    "enemy_damage_multiplier_per_wave": 1.02,
+    "heavy_ratio_base": 0.25,
+    "heavy_ratio_growth": 0.01,
+    "heavy_ratio_max": 0.6
   },
   "core_mining": {
     "reward_base": 20,
@@ -37,6 +42,21 @@
     "randomness": 0.15,
     "arrow_count": 3,
     "arrow_pulse": true
+  },
+  "preview_incoming": {
+    "enabled": true,
+    "marker_count": 6,
+    "show_in_build_phase": true
+  },
+  "wave_countdown": {
+    "enabled": true,
+    "duration": 3.0
+  },
+  "emergency_repair": {
+    "enabled": true,
+    "cost": 30,
+    "restore_amount": 20,
+    "one_use_per_base": true
   }
 }
 
