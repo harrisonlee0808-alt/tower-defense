@@ -10,13 +10,14 @@ from src.entities import Entity
 class DefenseTower(Entity):
     """Defense tower that automatically targets enemies."""
     
-    def __init__(self, x, y, damage, range_distance, cooldown, size, color):
+    def __init__(self, x, y, damage, range_distance, cooldown, size, color, cost):
         super().__init__(x, y, size, color)
         self.damage = damage
         self.range_distance = range_distance
         self.cooldown = cooldown
         self.current_cooldown = 0.0
         self.target = None
+        self.cost = cost
     
     def update(self, dt, enemies):
         """Update tower state and attack enemies."""

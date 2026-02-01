@@ -3,6 +3,7 @@
     "damage": 25,
     "range": 80,
     "cooldown": 1.0,
+    "cost": 25,
     "color": [0, 100, 255],
     "size": 12
   }
